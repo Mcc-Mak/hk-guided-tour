@@ -13,7 +13,28 @@
 import os
 import subprocess
 from pathlib import Path
+
+import httpx
+
+_original_client_init = httpx.Client.__init__
+_original_async_client_init = httpx.AsyncClient.__init__
+
+def _patched_client_init(self, *args, **kwargs):
+    if "verify" not in kwargs:
+        kwargs["verify"] = False
+    return _original_client_init(self, *args, **kwargs)
+
+def _patched_async_client_init(self, *args, **kwargs):
+    if "verify" not in kwargs:
+        kwargs["verify"] = False
+    return _original_async_client_init(self, *args, **kwargs)
+
+httpx.Client.__init__ = _patched_client_init
+httpx.AsyncClient.__init__ = _patched_async_client_init
+
 from crewai import Agent, Crew, Process, Task, LLM
+
+MATRIX_PATH = "導賞目標建築矩陣.md"
 
 # ==========================================
 # 1. LLM 初始化配置 (含 Fallback 機制)
@@ -27,7 +48,7 @@ def get_primary_llm() -> LLM:
         base_url="https://litellm.services.hko.gov.hk",
         api_key=hko_api_key if hko_api_key else "dummy_key",
         temperature=0.2,
-        timeout=60
+        timeout=180
     )
 
 def get_fallback_llm() -> LLM:
@@ -37,7 +58,7 @@ def get_fallback_llm() -> LLM:
         base_url="https://api.opencode.ai/v1",
         api_key=os.getenv("OPENCODE_API_KEY", "free-tier"),
         temperature=0.2,
-        timeout=60
+        timeout=180
     )
 
 def execute_crew_with_fallback(agents_builder_func, tasks_builder_func, inputs: dict) -> str:
@@ -111,8 +132,9 @@ def build_tasks(agents, inputs: dict):
         description=(
             "研究目標建築 '{building_name}'（地址：{address}，類別：{category}，標籤：{tag}）。"
             "請全面搜集其建設年份、建築風格與歷史事件，並**必須自主挖掘或整理出該建築最具公信力的官方歷史檔案連結，並強制以 Markdown 格式（例如 [官方文獻名稱](網址)）作為「歷史檔案（連結）」的輸出內容**。"
+            "歷史事件資料必須以「{歷史時期/特徵}」分組，每組內以「{年份}：{歷史描述}」格式條列整理。"
         ),
-        expected_output="包含建築基本數據、歷史事實、參考資料清單以及由 CrewAI 動態產出之 Markdown 格式官方檔案超連結的研究報告。",
+        expected_output="包含建築基本數據、歷史事實（以「{年份}：{歷史描述}」格式按「{歷史時期/特徵}」分組）、參考資料清單以及由 CrewAI 動態產出之 Markdown 格式官方檔案超連結的研究報告。",
         agent=researcher
     )
 
@@ -135,16 +157,37 @@ def build_tasks(agents, inputs: dict):
     t4 = Task(
         description=(
             "將以上所有內容匯整為一份標準 Markdown 格式手冊。\n"
-            "必須包含以下章節：\n"
-            "1. 導賞概覽與地址資訊\n"
-            "2. 歷史脈絡與建築特色\n"
-            "3. 事實查核與可信度評級表 (CL 1-5)\n"
-            "4. 歷史檔案狀態宣告（包含可信性等級、已更新之完成度 🟢 已完成，以及由 CrewAI 研究員動態產出之「歷史檔案（連結）」，**必須為標準 Markdown 超連結格式 [名稱](URL)**）\n"
-            "5. 導賞員現場講稿\n"
-            "6. 參考資料來源（列出官方檔案與參考文獻清單，所有網址均需採用 Markdown 語法）\n"
-            "全篇使用專業繁體中文。"
+            "必須嚴格遵循以下章節結構（使用中文數字編號一至六），不可增減章節：\n\n"
+            "## 一、導賞概覽與地址資訊\n"
+            "### 建築基本資料\n"
+            "（必須包含表格：建築名稱、地址、建設年份、建築風格、歷史評級）\n"
+            "### 導賞路線建議\n\n"
+            "## 二、歷史脈絡與建築特色\n"
+            "### 建築風格與特色\n"
+            "### 歷史事件與背景\n"
+            "（必須以「#### {歷史時期/特徵}」作為四級子標題分組，每組下列條目必須採用「- {年份}：{歷史描述}」格式條列）\n\n"
+            "## 三、事實查核與可信度評級表（CL 1-5）\n"
+            "### 歷史數據查核結果\n"
+            "（必須包含表格：項目、報告記載內容、查核結果、佐證來源、CL 評級）\n"
+            "### AI 幻覺過濾檢測報告\n"
+            "### 整體可信度評級\n"
+            "（必須包含表格：評估維度、CL 評級、說明）\n\n"
+            "## 四、歷史檔案狀態宣告\n"
+            "### 可信性等級\n"
+            "### 歷史檔案（連結）\n"
+            "（由 CrewAI 研究員動態產出之 Markdown 超連結，格式為 [名稱](URL)）\n\n"
+            "## 五、導賞員現場講稿\n"
+            "### 開場白\n"
+            "### 各站點\n"
+            "（每個站點以「### {站點名稱}」為三級標題，其下必須包含「#### 現場觀察重點」與「#### 歷史故事」兩個四級子標題）\n"
+            "### 結語\n\n"
+            "## 六、參考資料來源\n"
+            "### 官方檔案\n"
+            "（所有連結必須採用 Markdown 超連結格式 [名稱](URL)）\n"
+            "### 參考文獻清單\n\n"
+            "全篇使用專業繁體中文。歷史事件章節中的每一條目必須嚴格採用「{年份}：{歷史描述}」格式，並按「{歷史時期/特徵}」分組。"
         ),
-        expected_output="結構完整的 Markdown 導賞手冊全文（含 CrewAI 動態產出之 Markdown 歷史檔案超連結）。",
+        expected_output="結構完整的 Markdown 導賞手冊全文，嚴格遵循上述六大章節結構與子標題規範，歷史事件以「{年份}：{歷史描述}」格式按「{歷史時期/特徵}」分組，含 CrewAI 動態產出之 Markdown 歷史檔案超連結。",
         agent=editor
     )
 
@@ -161,9 +204,9 @@ def run_git_command(args: list):
     else:
         print(f" Git: git {' '.join(args)}")
 
-def auto_git_commit_and_push(file_path: str, building_name: str, branch: str = "dev-001"):
+def auto_git_commit_and_push(file_path: str, building_name: str, matrix_path: str = MATRIX_PATH, branch: str = "dev-001"):
     print(f"📦 對 {file_path} 進行版本控制...")
-    run_git_command(["add", file_path])
+    run_git_command(["add", file_path, matrix_path])
     commit_msg = f"docs(tour): 自動化生成 {building_name} 之導賞手冊 (含 CrewAI 動態 Markdown 檔案連結)"
     run_git_command(["commit", "-m", commit_msg])
     run_git_command(["push", "origin", branch])
@@ -172,9 +215,10 @@ def auto_git_commit_and_push(file_path: str, building_name: str, branch: str = "
 # 4. 主流程 (含解析、排序與啟動選單 TUI)
 # ==========================================
 
-def parse_and_sort_building_matrix(matrix_path: str = "BUILDING_MATRIX.md") -> list:
+
+def parse_and_sort_building_matrix(matrix_path: str = MATRIX_PATH) -> list:
     """
-    解析 BUILDING_MATRIX.md 並依序以：
+    解析導賞目標建築矩陣並依序以：
     1. 導賞專案類別
     2. 中文名稱
     3. 中文地址
@@ -196,7 +240,7 @@ def parse_and_sort_building_matrix(matrix_path: str = "BUILDING_MATRIX.md") -> l
         for line in f:
             if line.startswith("|") and not line.startswith("| 編號") and "---" not in line:
                 parts = [p.strip() for p in line.split("|")[1:-1]]
-                if len(parts) >= 9:
+                if len(parts) >= 10:
                     buildings.append({
                         "N": parts[0],
                         "category": parts[1],
@@ -204,7 +248,8 @@ def parse_and_sort_building_matrix(matrix_path: str = "BUILDING_MATRIX.md") -> l
                         "address": parts[4],
                         "tag": parts[6],
                         "credibility": parts[7],
-                        "completion": parts[8]
+                        "completion": parts[8],
+                        "link": parts[9]
                     })
 
     # 依照要求排序：導賞專案類別、中文名稱、中文地址
@@ -213,6 +258,25 @@ def parse_and_sort_building_matrix(matrix_path: str = "BUILDING_MATRIX.md") -> l
         key=lambda x: (x["category"], x["name"], x["address"])
     )
     return sorted_buildings
+
+
+def update_matrix_entry(matrix_path: str, building_name: str, link_url: str):
+    """生成手冊後更新矩陣中的「歷史檔案（連結）」欄位與工作進度狀態"""
+    link_md = f"[`歷史檔案（連結）`]({link_url})"
+
+    with open(matrix_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    with open(matrix_path, "w", encoding="utf-8") as f:
+        for line in lines:
+            if line.startswith("|") and "---" not in line and not line.startswith("| 編號"):
+                parts = [p.strip() for p in line.split("|")[1:-1]]
+                if len(parts) >= 10 and parts[2] == building_name:
+                    parts[8] = "🟢 已完成"
+                    parts[9] = link_md
+                    line = "| " + " | ".join(parts) + " |\n"
+                    print(f"📝 矩陣已更新：{building_name} -> 🟢 已完成 | {link_md}")
+            f.write(line)
 
 def main():
     output_dir = Path("建築")
@@ -253,8 +317,8 @@ def main():
     print("=" * 60 + "\n")
 
     # === 批次自動化執行迴圈 ===
-    for idx, item in enumerate(target_buildings, start=1):
-        n_id = str(idx).zfill(5)
+    for item in target_buildings:
+        n_id = str(int(item["N"])).zfill(5)
         b_name = item["name"]
         category = item["category"]
         address = item["address"]
@@ -265,7 +329,7 @@ def main():
         file_path = output_dir / f"{n_id}-{b_name}.md"
 
         print(f"--------------------------------------------------")
-        print(f"🏗️ 正在處理 [{n_id}] {b_name} ({category}) | 狀態: {completion} -> 啟動 CrewAI...")
+        print(f"🏗️ 正在處理 [編號 {item['N']}] {b_name} ({category}) | 狀態: {completion} -> 啟動 CrewAI...")
 
         inputs = {
             "building_name": b_name,
@@ -282,7 +346,9 @@ def main():
             f.write(content)
         print(f"📄 手冊已成功寫入: {file_path}")
 
-        auto_git_commit_and_push(str(file_path), b_name, branch="dev-001")
+        update_matrix_entry(MATRIX_PATH, b_name, f"建築/{n_id}-{b_name}.md")
+
+        auto_git_commit_and_push(str(file_path), b_name, matrix_path=MATRIX_PATH, branch="dev-001")
         print(f"✨ [{b_name}] 處理完成！\n")
 
     print("\n🎉 選定的所有導賞手冊均已成功透過 CrewAI 動態生成 Markdown 檔案連結並提交至 Git！")
